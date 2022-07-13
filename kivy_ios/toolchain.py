@@ -11,11 +11,12 @@ import platform
 import sys
 from sys import stdout
 from os.path import join, dirname, realpath, exists, isdir, basename
-from os import listdir, unlink, makedirs, environ, chdir, getcwd, walk
+from os import listdir, unlink, makedirs, environ, chdir, getcwd, walk, mkdir
 import sh
 import zipfile
 import tarfile
 import importlib
+import io
 import json
 import shutil
 import fnmatch
@@ -25,7 +26,7 @@ from contextlib import suppress
 from datetime import datetime
 from pprint import pformat
 import logging
-import urllib.request
+from urllib.request import FancyURLopener, urlcleanup
 from pbxproj import XcodeProject
 from pbxproj.pbxextensions.ProjectFiles import FileOptions
 
@@ -89,6 +90,15 @@ def remove_junk(d):
                 unlink(join(root, fn))
 
 
+class ChromeDownloader(FancyURLopener):
+    version = (
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/28.0.1500.71 Safari/537.36')
+
+
+urlretrieve = ChromeDownloader().retrieve
+
+
 class JsonStore:
     """Replacement of shelve using json, needed for support python 2 and 3.
     """
@@ -98,7 +108,7 @@ class JsonStore:
         self.data = {}
         if exists(filename):
             try:
-                with open(filename, encoding='utf-8') as fd:
+                with io.open(filename, encoding='utf-8') as fd:
                     self.data = json.load(fd)
             except ValueError:
                 logger.warning("Unable to read the state.db, content will be replaced.")
@@ -135,59 +145,30 @@ class JsonStore:
             json.dump(self.data, fd, ensure_ascii=False)
 
 
-class GenericPlatform:
-    sdk = "unspecified"
-    arch = "unspecified"
-    version_min = "unspecified"
-
+class Arch:
     def __init__(self, ctx):
         self.ctx = ctx
         self._ccsh = None
 
-    @property
-    def name(self):
-        return f"{self.sdk}-{self.arch}"
-
     def __str__(self):
-        return self.name
-
-    @property
-    def sysroot(self):
-        return sh.xcrun("--sdk", self.sdk, "--show-sdk-path").strip()
+        return self.arch
 
     @property
     def include_dirs(self):
         return [
             "{}/{}".format(
                 self.ctx.include_dir,
-                d.format(plat=self))
+                d.format(arch=self))
             for d in self.ctx.include_dirs]
-
-    @property
-    def lib_dirs(self):
-        return [join(self.ctx.dist_dir, "lib", self.sdk)]
 
     def get_env(self):
         include_dirs = [
             "-I{}/{}".format(
                 self.ctx.include_dir,
-                d.format(plat=self))
+                d.format(arch=self))
             for d in self.ctx.include_dirs]
         include_dirs += ["-I{}".format(
-            join(self.ctx.dist_dir, "include", self.name))]
-
-        # Add Python include directories
-        include_dirs += [
-            "-I{}".format(
-                join(
-                    self.ctx.dist_dir,
-                    "root",
-                    "python3",
-                    "include",
-                    f"python{self.ctx.hostpython_ver}",
-                )
-            )
-        ]
+            join(self.ctx.dist_dir, "include", self.arch))]
 
         env = {}
         cc = sh.xcrun("-find", "-sdk", self.sdk, "clang").strip()
@@ -207,7 +188,7 @@ class GenericPlatform:
         use_ccache = environ.get("USE_CCACHE", "1")
         ccache = None
         if use_ccache == "1":
-            ccache = shutil.which('ccache')
+            ccache = sh.which('ccache')
         if ccache:
             ccache = ccache.strip()
             env["USE_CCACHE"] = "1"
@@ -221,18 +202,8 @@ class GenericPlatform:
                  'include_file_mtime,include_file_ctime,file_stat_matches'))
 
         if not self._ccsh:
-            def noicctempfile():
-                '''
-                reported issue where C Python has issues with 'icc' in the compiler path
-                https://github.com/python/cpython/issues/96398
-                https://github.com/python/cpython/pull/96399
-                '''
-                while 'icc' in (x := tempfile.NamedTemporaryFile()).name:
-                    pass
-                return x
-
-            self._ccsh = noicctempfile()
-            self._cxxsh = noicctempfile()
+            self._ccsh = tempfile.NamedTemporaryFile()
+            self._cxxsh = tempfile.NamedTemporaryFile()
             sh.chmod("+x", self._ccsh.name)
             sh.chmod("+x", self._cxxsh.name)
             self._ccsh.write(b'#!/bin/sh\n')
@@ -257,60 +228,39 @@ class GenericPlatform:
         env["AR"] = sh.xcrun("-find", "-sdk", self.sdk, "ar").strip()
         env["LD"] = sh.xcrun("-find", "-sdk", self.sdk, "ld").strip()
         env["OTHER_CFLAGS"] = " ".join(include_dirs)
-        env["OTHER_LDFLAGS"] = " ".join([f"-L{d}" for d in self.lib_dirs])
+        env["OTHER_LDFLAGS"] = " ".join([
+            "-L{}/{}".format(self.ctx.dist_dir, "lib"),
+        ])
         env["CFLAGS"] = " ".join([
             "-O3",
-            self.version_min,
+            self.version_min
         ] + include_dirs)
-        env["CXXFLAGS"] = env["CFLAGS"]
+        if self.sdk == "iphoneos":
+            env["CFLAGS"] += " -fembed-bitcode"
         env["LDFLAGS"] = " ".join([
             "-arch", self.arch,
             # "--sysroot", self.sysroot,
-            *[f"-L{d}" for d in self.lib_dirs],
+            "-L{}/{}".format(self.ctx.dist_dir, "lib"),
             "-L{}/usr/lib".format(self.sysroot),
             self.version_min
         ])
         return env
 
 
-class iPhoneSimulatorPlatform(GenericPlatform):
+class Arch64Simulator(Arch):
     sdk = "iphonesimulator"
-    version_min = "-miphonesimulator-version-min=9.0"
-
-
-class iPhoneOSPlatform(GenericPlatform):
-    sdk = "iphoneos"
+    arch = "x86_64"
+    triple = "x86_64-apple-darwin13"
     version_min = "-miphoneos-version-min=9.0"
+    sysroot = sh.xcrun("--sdk", "iphonesimulator", "--show-sdk-path").strip()
 
 
-class macOSPlatform(GenericPlatform):
-    sdk = "macosx"
-    version_min = "-mmacosx-version-min=10.9"
-
-
-class iPhoneSimulatorARM64Platform(iPhoneSimulatorPlatform):
+class Arch64IOS(Arch):
+    sdk = "iphoneos"
     arch = "arm64"
     triple = "aarch64-apple-darwin13"
-
-
-class iPhoneSimulatorx86_64Platform(iPhoneSimulatorPlatform):
-    arch = "x86_64"
-    triple = "x86_64-apple-darwin13"
-
-
-class iPhoneOSARM64Platform(iPhoneOSPlatform):
-    arch = "arm64"
-    triple = "aarch64-apple-darwin13"
-
-
-class macOSx86_64Platform(macOSPlatform):
-    arch = "x86_64"
-    triple = "x86_64-apple-darwin13"
-
-
-class macOSARM64Platform(macOSPlatform):
-    arch = "arm64"
-    triple = "aarch64-apple-darwin13"
+    version_min = "-miphoneos-version-min=9.0"
+    sysroot = sh.xcrun("--sdk", "iphoneos", "--show-sdk-path").strip()
 
 
 class Graph:
@@ -410,34 +360,14 @@ class Context:
         self.dist_dir = "{}/dist".format(initial_working_directory)
         self.install_dir = "{}/dist/root".format(initial_working_directory)
         self.include_dir = "{}/dist/include".format(initial_working_directory)
-
-        # Supported platforms may differ from default ones,
-        # and the user may select to build only a subset of them via
-        # --platforms command line argument.
-        self.supported_platforms = [
-            iPhoneOSARM64Platform(self),
-            iPhoneSimulatorARM64Platform(self),
-            iPhoneSimulatorx86_64Platform(self),
-        ]
-
-        # By default build the following platforms:
-        # - iPhoneOSARM64Platform* (arm64)
-        # - iPhoneOSSimulator*Platform (arm64 or x86_64), depending on the host
-        self.default_platforms = [iPhoneOSARM64Platform(self)]
-        if platform.machine() == "x86_64":
-            # Intel Mac, build for iPhoneOSSimulatorx86_64Platform
-            self.default_platforms.append(iPhoneSimulatorx86_64Platform(self))
-        elif platform.machine() == "arm64":
-            # Apple Silicon Mac, build for iPhoneOSSimulatorARM64Platform
-            self.default_platforms.append(iPhoneSimulatorARM64Platform(self))
-
-        # If the user didn't specify a platform, use the default ones.
-        self.selected_platforms = self.default_platforms
+        self.archs = (
+            Arch64Simulator(self),
+            Arch64IOS(self))
 
         # path to some tools
-        self.ccache = shutil.which("ccache")
+        self.ccache = sh.which("ccache")
         for cython_fn in ("cython-2.7", "cython"):
-            cython = shutil.which(cython_fn)
+            cython = sh.which(cython_fn)
             if cython:
                 self.cython = cython
                 break
@@ -447,15 +377,15 @@ class Context:
 
         # check the basic tools
         for tool in ("pkg-config", "autoconf", "automake", "libtool"):
-            if not shutil.which(tool):
+            if not sh.which(tool):
                 logger.error("Missing requirement: {} is not installed".format(
                     tool))
 
         if not ok:
             sys.exit(1)
 
-        self.use_pigz = shutil.which('pigz')
-        self.use_pbzip2 = shutil.which('pbzip2')
+        self.use_pigz = sh.which('pigz')
+        self.use_pbzip2 = sh.which('pbzip2')
 
         try:
             num_cores = int(sh.sysctl('-n', 'hw.ncpu'))
@@ -497,17 +427,16 @@ class Recipe:
         "is_alias": False,
         "version": None,
         "url": None,
-        "supported_platforms": ["iphoneos-arm64", "iphonesimulator-x86_64", "iphonesimulator-arm64"],
+        "archs": [],
         "depends": [],
         "optional_depends": [],
         "python_depends": [],
         "library": None,
         "libraries": [],
         "include_dir": None,
-        "include_per_platform": False,
+        "include_per_arch": False,
         "include_name": None,
         "frameworks": [],
-        "embed_xcframeworks": [],
         "sources": [],
         "pbx_frameworks": [],
         "pbx_libraries": [],
@@ -543,14 +472,13 @@ class Recipe:
             unlink(filename)
 
         # Clean up temporary files just in case before downloading.
-        urllib.request.urlcleanup()
+        urlcleanup()
 
         logger.info('Downloading {0}'.format(url))
         attempts = 0
         while True:
             try:
-                url_opener.addheaders = [('User-agent', 'Wget/1.0')]
-                urllib.request.urlretrieve(url, filename, report_hook)
+                urlretrieve(url, filename, report_hook)
             except OSError:
                 attempts += 1
                 if attempts >= 5:
@@ -559,8 +487,6 @@ class Recipe:
                 logger.warning('Download failed. Retrying in 1 second...')
                 time.sleep(1)
                 continue
-            finally:
-                url_opener.addheaders = url_orig_headers
             break
 
         return filename
@@ -687,24 +613,29 @@ class Recipe:
         return fn
 
     @property
-    def platforms_to_build(self):
-        for selected_platform in self.ctx.selected_platforms:
-            if selected_platform.name in self.supported_platforms:
-                yield selected_platform
+    def filtered_archs(self):
+        result = []
+        for arch in self.ctx.archs:
+            if not self.archs or (arch.arch in self.archs):
+                result.append(arch)
+        return result
 
     @property
-    def dist_xcframeworks(self):
-        for lib in self._get_all_libraries():
-            lib_name = basename(lib).split(".a")[0]
-            yield join(self.ctx.dist_dir, "xcframework", f"{lib_name}.xcframework")
+    def dist_libraries(self):
+        libraries = []
+        name = self.name
+        if not name.startswith("lib"):
+            name = "lib{}".format(name)
+        if self.library:
+            static_fn = join(self.ctx.dist_dir, "lib", "{}.a".format(name))
+            libraries.append(static_fn)
+        for library in self.libraries:
+            static_fn = join(self.ctx.dist_dir, "lib", basename(library))
+            libraries.append(static_fn)
+        return libraries
 
-    @property
-    def dist_embed_xcframeworks(self):
-        for f in self.embed_xcframeworks:
-            yield join(self.ctx.dist_dir, "xcframework", f"{f}.xcframework")
-
-    def get_build_dir(self, plat):
-        return join(self.ctx.build_dir, self.name, plat.name, self.archive_root)
+    def get_build_dir(self, arch):
+        return join(self.ctx.build_dir, self.name, arch, self.archive_root)
 
     # Public Recipe API to be subclassed if needed
 
@@ -713,20 +644,20 @@ class Recipe:
         include_dir = None
         if self.include_dir:
             include_name = self.include_name or self.name
-            if self.include_per_platform:
-                include_dir = join("{plat.name}", include_name)
+            if self.include_per_arch:
+                include_dir = join("{arch.arch}", include_name)
             else:
                 include_dir = join("common", include_name)
         if include_dir:
             logger.info("Include dir added: {}".format(include_dir))
             self.ctx.include_dirs.append(include_dir)
 
-    def get_recipe_env(self, plat=None):
+    def get_recipe_env(self, arch=None):
         """Return the env specialized for the recipe
         """
-        if plat is None:
-            plat = list(self.platforms_to_build)[0]
-        return plat.get_env()
+        if arch is None:
+            arch = self.filtered_archs[0]
+        return arch.get_env()
 
     def set_hostpython(self, instance, version):
         state = self.ctx.state
@@ -815,12 +746,12 @@ class Recipe:
     @cache_execution
     def extract(self):
         # recipe tmp directory
-        for plat in self.platforms_to_build:
-            logger.info("Extract {} for {}".format(self.name, plat.name))
-            self.extract_platform(plat)
+        for arch in self.filtered_archs:
+            logger.info("Extract {} for {}".format(self.name, arch.arch))
+            self.extract_arch(arch.arch)
 
-    def extract_platform(self, plat):
-        build_dir = join(self.ctx.build_dir, self.name, plat.name)
+    def extract_arch(self, arch):
+        build_dir = join(self.ctx.build_dir, self.name, arch)
         dest_dir = join(build_dir, self.archive_root)
         if self.custom_dir:
             shutil.rmtree(dest_dir, ignore_errors=True)
@@ -841,45 +772,59 @@ class Recipe:
             _hostpython_pip(["install", prerequisite])
 
     @cache_execution
-    def build(self, plat):
-        self.build_dir = self.get_build_dir(plat)
+    def build(self, arch):
+        self.build_dir = self.get_build_dir(arch.arch)
         if self.has_marker("building"):
             logger.warning("{} build for {} has been incomplete".format(
-                self.name, plat.arch))
+                self.name, arch.arch))
             logger.warning("Warning: deleting the build and restarting.")
             shutil.rmtree(self.build_dir, ignore_errors=True)
-            self.extract_platform(plat)
+            self.extract_arch(arch.arch)
 
         if self.has_marker("build_done"):
-            logger.info("Build python for {} already done.".format(plat.arch))
+            logger.info("Build python for {} already done.".format(arch.arch))
             return
 
+        if not isdir(self.build_dir):
+            mkdir(self.build_dir)
+        self.extract_arch(arch.arch)
         self.set_marker("building")
 
         chdir(self.build_dir)
-        logger.info("Prebuild {} for {}".format(self.name, plat.arch))
-        self.prebuild_platform(plat)
-        logger.info("Build {} for {}".format(self.name, plat.arch))
-        self.build_platform(plat)
-        logger.info("Postbuild {} for {}".format(self.name, plat.arch))
-        self.postbuild_platform(plat)
+        logger.info("Prebuild {} for {}".format(self.name, arch.arch))
+        self.prebuild_arch(arch)
+        logger.info("Build {} for {}".format(self.name, arch.arch))
+        self.build_arch(arch)
+        logger.info("Postbuild {} for {}".format(self.name, arch.arch))
+        self.postbuild_arch(arch)
         self.delete_marker("building")
         self.set_marker("build_done")
 
     @cache_execution
     def build_all(self):
+        filtered_archs = self.filtered_archs
         logger.info("Build {} for {} (filtered)".format(
             self.name,
-            ", ".join([plat.name for plat in self.platforms_to_build])
-        ))
+            ", ".join([x.arch for x in filtered_archs])))
+        for arch in self.filtered_archs:
+            self.build(arch)
 
-        for plat in self.platforms_to_build:
-            self.build(plat)
-
-        logger.info(f"Create lipo libraries for {self.name}")
-        self.lipoize_libraries()
-        logger.info(f"Create xcframeworks for {self.name}")
-        self.create_xcframeworks()
+        name = self.name
+        if self.library:
+            logger.info("Create lipo library for {}".format(name))
+            if not name.startswith("lib"):
+                name = "lib{}".format(name)
+            static_fn = join(self.ctx.dist_dir, "lib", "{}.a".format(name))
+            ensure_dir(dirname(static_fn))
+            logger.info("Lipo {} to {}".format(self.name, static_fn))
+            self.make_lipo(static_fn)
+        if self.libraries:
+            logger.info("Create multiple lipo for {}".format(name))
+            for library in self.libraries:
+                static_fn = join(self.ctx.dist_dir, "lib", basename(library))
+                ensure_dir(dirname(static_fn))
+                logger.info("  - Lipo-ize {}".format(library))
+                self.make_lipo(static_fn, library)
         logger.info("Install include files for {}".format(self.name))
         self.install_include()
         logger.info("Install frameworks for {}".format(self.name))
@@ -891,20 +836,20 @@ class Recipe:
         logger.info("Install {}".format(self.name))
         self.install()
 
-    def prebuild_platform(self, plat):
-        prebuild = "prebuild_{}".format(plat.arch)
+    def prebuild_arch(self, arch):
+        prebuild = "prebuild_{}".format(arch.arch)
         logger.debug("Invoking {}".format(prebuild))
         if hasattr(self, prebuild):
             getattr(self, prebuild)()
 
-    def build_platform(self, plat):
-        build = "build_{}".format(plat.arch)
+    def build_arch(self, arch):
+        build = "build_{}".format(arch.arch)
         logger.debug("Invoking {}".format(build))
         if hasattr(self, build):
             getattr(self, build)()
 
-    def postbuild_platform(self, plat):
-        postbuild = "postbuild_{}".format(plat.arch)
+    def postbuild_arch(self, arch):
+        postbuild = "postbuild_{}".format(arch.arch)
         logger.debug("Invoking {}".format(postbuild))
         if hasattr(self, postbuild):
             getattr(self, postbuild)()
@@ -922,58 +867,26 @@ class Recipe:
         self.ctx.state[key_time] = now_str
         logger.debug("New State: {} at {}".format(key, now_str))
 
-    def _get_all_libraries(self):
-        all_libraries = []
-        if self.library:
-            all_libraries.append(self.library)
-        if self.libraries:
-            all_libraries.extend(self.libraries)
-        return all_libraries
-
     @cache_execution
-    def lipoize_libraries(self):
-
-        for library_fp in self._get_all_libraries():
-            library_fn = basename(library_fp)
-            logger.info("Create lipo library for {}".format(library_fn))
-
-            # We are required to create a lipo library for each platform
-            # (iPhoneOS and iPhoneSimulator are 2 different platforms)
-            sdks_args = {}
-            for plat in self.platforms_to_build:
-                if plat.sdk not in sdks_args:
-                    sdks_args[plat.sdk] = []
-                sdks_args[plat.sdk].extend([
-                    "-arch", plat.arch,
-                    join(self.get_build_dir(plat), library_fp.format(plat=plat))
-                ])
-
-            for sdk, sdk_args in sdks_args.items():
-                static_fn = join(self.ctx.dist_dir, "lib", sdk, library_fn)
-                ensure_dir(dirname(static_fn))
-                shprint(sh.lipo, "-create", "-output", static_fn, *sdk_args)
-
-    @cache_execution
-    def create_xcframeworks(self):
-        for library_fp in self._get_all_libraries():
-            library_fn = basename(library_fp)
-            library_name = library_fn.split(".a")[0]
-
-            xcframework_args = []
-            for plat in self.platforms_to_build:
-                static_fn = join(self.ctx.dist_dir, "lib", plat.sdk, library_fn)
-                xcframework_args.extend(["-library", static_fn])
-
-            xcframework_fn = join(self.ctx.dist_dir, "xcframework", f"{library_name}.xcframework")
-            ensure_dir(dirname(xcframework_fn))
-            shutil.rmtree(xcframework_fn, ignore_errors=True)
-            shprint(sh.xcodebuild, "-create-xcframework", *xcframework_args, "-output", xcframework_fn)
+    def make_lipo(self, filename, library=None):
+        if library is None:
+            library = self.library
+        if not library:
+            return
+        args = []
+        for arch in self.filtered_archs:
+            library_fn = library.format(arch=arch)
+            args += [
+                "-arch", arch.arch,
+                join(self.get_build_dir(arch.arch), library_fn)]
+        shprint(sh.lipo, "-create", "-output", filename, *args)
 
     @cache_execution
     def install_frameworks(self):
         if not self.frameworks:
             return
-        build_dir = self.get_build_dir(list(self.platforms_to_build)[0])
+        arch = self.filtered_archs[0]
+        build_dir = self.get_build_dir(arch.arch)
         for framework in self.frameworks:
             logger.info("Install Framework {}".format(framework))
             src = join(build_dir, framework)
@@ -987,7 +900,8 @@ class Recipe:
     def install_sources(self):
         if not self.sources:
             return
-        build_dir = self.get_build_dir(list(self.platforms_to_build)[0])
+        arch = self.filtered_archs[0]
+        build_dir = self.get_build_dir(arch.arch)
         for source in self.sources:
             logger.info("Install Sources{}".format(source))
             src = join(build_dir, source)
@@ -1001,25 +915,29 @@ class Recipe:
     def install_include(self):
         if not self.include_dir:
             return
+        if self.include_per_arch:
+            archs = self.ctx.archs
+        else:
+            archs = self.filtered_archs[:1]
 
         include_dirs = self.include_dir
         if not isinstance(include_dirs, (list, tuple)):
             include_dirs = list([include_dirs])
 
-        for plat in self.platforms_to_build:
-            plat_dir = "common"
-            if self.include_per_platform:
-                plat_dir = plat.name
+        for arch in archs:
+            arch_dir = "common"
+            if self.include_per_arch:
+                arch_dir = arch.arch
             include_name = self.include_name or self.name
-            dest_dir = join(self.ctx.include_dir, plat_dir, include_name)
+            dest_dir = join(self.ctx.include_dir, arch_dir, include_name)
             shutil.rmtree(dest_dir, ignore_errors=True)
-            build_dir = self.get_build_dir(plat)
+            build_dir = self.get_build_dir(arch.arch)
 
             for include_dir in include_dirs:
                 dest_name = None
                 if isinstance(include_dir, (list, tuple)):
                     include_dir, dest_name = include_dir
-                include_dir = include_dir.format(plat=plat, ctx=self.ctx)
+                include_dir = include_dir.format(arch=arch, ctx=self.ctx)
                 src_dir = join(build_dir, include_dir)
                 if dest_name is None:
                     dest_name = basename(src_dir)
@@ -1031,15 +949,10 @@ class Recipe:
                     ensure_dir(dirname(dest))
                     shutil.copy(src_dir, dest)
 
-            if not self.include_per_platform:
-                # We only need to copy the include files once, even if we're
-                # building for multiple platforms.
-                break
-
     @cache_execution
     def install_python_deps(self):
         for dep in self.python_depends:
-            _pip(["install", "--no-deps", "--platform", "any", dep])
+            _pip(["install", dep])
 
     @cache_execution
     def install(self):
@@ -1093,21 +1006,9 @@ class Recipe:
 
 
 class HostRecipe(Recipe):
-
     @property
-    def supported_platforms(self):
-        if platform.machine() == 'x86_64':
-            return ["macosx-x86_64"]
-        elif platform.machine() == 'arm64':
-            return ["macosx-arm64"]
-
-    @property
-    def platforms_to_build(self):
-        for supported_platform in self.supported_platforms:
-            if supported_platform == "macosx-x86_64":
-                yield macOSx86_64Platform(self.ctx)
-            elif supported_platform == "macosx-arm64":
-                yield macOSARM64Platform(self.ctx)
+    def archs(self):
+        return [platform.machine()]
 
 
 class PythonRecipe(Recipe):
@@ -1121,16 +1022,15 @@ class PythonRecipe(Recipe):
         """Automate the installation of a Python package into the target
         site-packages.
 
-        It will works with the first platforms_to_build,
-        and the name of the recipe.
+        It will works with the first filtered_archs, and the name of the recipe.
         """
-        plat = list(self.platforms_to_build)[0]
+        arch = self.filtered_archs[0]
         if name is None:
             name = self.name
         if env is None:
-            env = self.get_recipe_env(plat)
+            env = self.get_recipe_env(arch)
         logger.info("Install {} into the site-packages".format(name))
-        build_dir = self.get_build_dir(plat)
+        build_dir = self.get_build_dir(arch.arch)
         chdir(build_dir)
         hostpython = sh.Command(self.ctx.hostpython)
 
@@ -1154,7 +1054,6 @@ class PythonRecipe(Recipe):
 class CythonRecipe(PythonRecipe):
     pre_build_ext = False
     cythonize = True
-    hostpython_prerequisites = ["Cython==3.0.11"]
 
     def cythonize_file(self, filename):
         if filename.startswith(self.build_dir):
@@ -1164,8 +1063,7 @@ class CythonRecipe(PythonRecipe):
         # doesn't (yet) have the executable bit hence we explicitly call it
         # with the Python interpreter
         cythonize_script = join(self.ctx.root_dir, "tools", "cythonize.py")
-
-        shprint(sh.Command(self.ctx.hostpython), cythonize_script, filename)
+        shprint(sh.python, cythonize_script, filename)
 
     def cythonize_build(self):
         if not self.cythonize:
@@ -1183,19 +1081,18 @@ class CythonRecipe(PythonRecipe):
         cmd = sh.Command(join(self.ctx.root_dir, "tools", "biglink"))
         shprint(cmd, join(self.build_dir, "lib{}.a".format(self.name)), *dirs)
 
-    def get_recipe_env(self, plat):
-        env = super().get_recipe_env(plat)
+    def get_recipe_env(self, arch):
+        env = super().get_recipe_env(arch)
         env["KIVYIOSROOT"] = self.ctx.root_dir
-        env["IOSSDKROOT"] = plat.sysroot
+        env["IOSSDKROOT"] = arch.sysroot
         env["CUSTOMIZED_OSX_COMPILER"] = 'True'
         env["LDSHARED"] = join(self.ctx.root_dir, "tools", "liblink")
         env["ARM_LD"] = env["LD"]
-        env["PLATFORM_SDK"] = plat.sdk
-        env["ARCH"] = plat.arch
+        env["ARCH"] = arch.arch
         return env
 
-    def build_platform(self, plat):
-        build_env = self.get_recipe_env(plat)
+    def build_arch(self, arch):
+        build_env = self.get_recipe_env(arch)
         hostpython = sh.Command(self.ctx.hostpython)
         if self.pre_build_ext:
             with suppress(Exception):
@@ -1288,16 +1185,7 @@ def _pip(args):
     pip_path = join(ctx.dist_dir, 'hostpython3', 'bin', 'pip3')
 
     if len(args) > 1 and args[0] == "install":
-        pip_args = ["--isolated"]
-
-        # --platform option requires --target, but --target can't be used
-        # with --prefix. We should prefer --prefix if it's possible,
-        # cause it notices already installed dependencies.
-        if "--platform" in args:
-            pip_args += ["--target", ctx.site_packages_dir]
-        else:
-            pip_args += ["--prefix", ctx.python_prefix]
-
+        pip_args = ["--isolated", "--prefix", ctx.python_prefix]
         args = ["install"] + pip_args + args[1:]
 
     logger.info("Executing pip with: {}".format(args))
@@ -1320,8 +1208,7 @@ def update_pbxproj(filename, pbx_frameworks=None):
     if pbx_frameworks is None:
         pbx_frameworks = []
     frameworks = []
-    xcframeworks = []
-    embed_xcframeworks = []
+    libraries = []
     sources = []
     for recipe in Recipe.list_recipes():
         key = "{}.build_all".format(recipe)
@@ -1331,33 +1218,32 @@ def update_pbxproj(filename, pbx_frameworks=None):
         recipe.init_with_ctx(ctx)
         pbx_frameworks.extend(recipe.pbx_frameworks)
         pbx_libraries.extend(recipe.pbx_libraries)
-        xcframeworks.extend(recipe.dist_xcframeworks)
+        libraries.extend(recipe.dist_libraries)
         frameworks.extend(recipe.frameworks)
-        embed_xcframeworks.extend(recipe.dist_embed_xcframeworks)
         if recipe.sources:
             sources.append(recipe.name)
 
     pbx_frameworks = list(set(pbx_frameworks))
     pbx_libraries = list(set(pbx_libraries))
-    xcframeworks = list(set(xcframeworks))
-    embed_xcframeworks = list(set(embed_xcframeworks))
+    libraries = list(set(libraries))
 
     logger.info("-" * 70)
     logger.info("The project need to have:")
     logger.info("iOS Frameworks: {}".format(pbx_frameworks))
     logger.info("iOS Libraries: {}".format(pbx_libraries))
     logger.info("iOS local Frameworks: {}".format(frameworks))
-    logger.info("XCFrameworks: {}".format(xcframeworks))
-    logger.info("XCFrameworks (embed): {}".format(embed_xcframeworks))
+    logger.info("Libraries: {}".format(libraries))
     logger.info("Sources to link: {}".format(sources))
 
     logger.info("-" * 70)
     logger.info("Analysis of {}".format(filename))
 
     project = XcodeProject.load(filename)
+    sysroot = sh.xcrun("--sdk", "iphonesimulator", "--show-sdk-path").strip()
 
     group = project.get_or_create_group("Frameworks")
     g_classes = project.get_or_create_group("Classes")
+    file_options = FileOptions(embed_framework=False, code_sign_on_copy=True)
     for framework in pbx_frameworks:
         framework_name = "{}.framework".format(framework)
         if framework_name in frameworks:
@@ -1365,41 +1251,21 @@ def update_pbxproj(filename, pbx_frameworks=None):
             f_path = join(ctx.dist_dir, "frameworks", framework_name)
         else:
             logger.info("Ensure {} is in the project (pbx_frameworks, system)".format(framework))
-            # We do not need to specify the full path to the framework, as
-            # Xcode will search for it in the SDKs.
-            f_path = framework_name
-        project.add_file(
-            f_path,
-            parent=group,
-            tree="DEVELOPER_DIR",
-            force=False,
-            file_options=FileOptions(
-                embed_framework=False,
-                code_sign_on_copy=True
-            ),
-        )
+            f_path = join(sysroot, "System", "Library", "Frameworks",
+                          "{}.framework".format(framework))
+        project.add_file(f_path, parent=group, tree="DEVELOPER_DIR",
+                         force=False, file_options=file_options)
     for library in pbx_libraries:
-        library_name = f"{library}.tbd"
-        logger.info("Ensure {} is in the project (pbx_libraries, tbd)".format(library))
-        # We do not need to specify the full path to the library, as
-        # Xcode will search for it in the SDKs.
-        project.add_file(library_name, parent=group, tree="DEVELOPER_DIR", force=False)
-    for xcframework in xcframeworks:
-        logger.info("Ensure {} is in the project (xcframework)".format(xcframework))
-        project.add_file(
-            xcframework,
-            parent=group,
-            force=False,
-            file_options=FileOptions(embed_framework=False)
-        )
-    for xcframework in embed_xcframeworks:
-        logger.info("Ensure {} is in the project (embed_xcframework)".format(xcframework))
-        project.add_file(
-            xcframework,
-            parent=group,
-            force=False,
-            file_options=FileOptions(embed_framework=True)
-        )
+        logger.info("Ensure {} is in the project (pbx_libraries, dylib+tbd)".format(library))
+        f_path = join(sysroot, "usr", "lib",
+                      "{}.dylib".format(library))
+        project.add_file(f_path, parent=group, tree="DEVELOPER_DIR", force=False)
+        f_path = join(sysroot, "usr", "lib",
+                      "{}.tbd".format(library))
+        project.add_file(f_path, parent=group, tree="DEVELOPER_DIR", force=False)
+    for library in libraries:
+        logger.info("Ensure {} is in the project (libraries)".format(library))
+        project.add_file(library, parent=group, force=False)
     for name in sources:
         logger.info("Ensure {} sources are used".format(name))
         fn = join(ctx.dist_dir, "sources", name)
@@ -1466,8 +1332,8 @@ pip           Install a pip dependency into the distribution
         parser = argparse.ArgumentParser(
                 description="Build the toolchain")
         parser.add_argument("recipe", nargs="+", help="Recipe to compile")
-        parser.add_argument("--platform", action="append",
-                            help="Restrict compilation specific platform (multiple allowed)")
+        parser.add_argument("--arch", action="append",
+                            help="Restrict compilation to this arch")
         parser.add_argument("--concurrency", type=int, default=ctx.num_cores,
                             help="number of concurrent build processes (where supported)")
         parser.add_argument("--no-pigz", action="store_true", default=not bool(ctx.use_pigz),
@@ -1478,26 +1344,19 @@ pip           Install a pip dependency into the distribution
                             help="Path to custom recipe")
         args = parser.parse_args(sys.argv[2:])
 
-        if args.platform:
-
-            # User requested a specific set of platforms, so we need to reset
-            # the list of the selected platforms.
-            ctx.selected_platforms = []
-
-            for req_platform in args.platform:
-
-                if req_platform in [plat.name for plat in ctx.selected_platforms]:
-                    logger.error(f"Platform {req_platform} has been specified multiple times")
-                    sys.exit(1)
-
-                if req_platform not in [plat.name for plat in ctx.supported_platforms]:
-                    logger.error(f"Platform {req_platform} is not supported")
-                    sys.exit(1)
-
-                ctx.selected_platforms.extend([plat for plat in ctx.supported_platforms if plat.name == req_platform])
-
-            logger.info(f"The following platforms has been requested to build: {ctx.selected_platforms}")
-
+        if args.arch:
+            if len(args.arch) == 1:
+                archs = args.arch[0].split()
+            else:
+                archs = args.arch
+            available_archs = [arch.arch for arch in ctx.archs]
+            for arch in archs[:]:
+                if arch not in available_archs:
+                    logger.error("Architecture {} invalid".format(arch))
+                    archs.remove(arch)
+                    continue
+            ctx.archs = [arch for arch in ctx.archs if arch.arch in archs]
+            logger.info("Architectures restricted to: {}".format(archs))
         ctx.num_cores = args.concurrency
         if args.no_pigz:
             ctx.use_pigz = False
@@ -1643,17 +1502,17 @@ pip           Install a pip dependency into the distribution
         print("-------------")
         for attr in dir(ctx):
             if not attr.startswith("_"):
-                if not callable(attr) and attr != 'supported_platforms':
+                if not callable(attr) and attr != 'archs':
                     print("{}: {}".format(attr, pformat(getattr(ctx, attr))))
-        for supported_platform in ctx.supported_platforms:
-            ul = '-' * (len(str(supported_platform)) + 6)
-            print("\narch: {}\n{}".format(str(supported_platform), ul))
-            for attr in dir(supported_platform):
+        for arch in ctx.archs:
+            ul = '-' * (len(str(arch))+6)
+            print("\narch: {}\n{}".format(str(arch), ul))
+            for attr in dir(arch):
                 if not attr.startswith("_"):
                     if not callable(attr) and attr not in ['arch', 'ctx', 'get_env']:
-                        print("{}: {}".format(attr, pformat(getattr(supported_platform, attr))))
-            env = supported_platform.get_env()
-            print("env ({}): {}".format(supported_platform, pformat(env)))
+                        print("{}: {}".format(attr, pformat(getattr(arch, attr))))
+            env = arch.get_env()
+            print("env ({}): {}".format(arch, pformat(env)))
 
     def pip3(self):
         self.pip()
