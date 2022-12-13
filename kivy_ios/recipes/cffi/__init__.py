@@ -69,7 +69,9 @@ class CFFIRecipe(PythonRecipe):
             shutil.copyfile(src, dst)
 
     def install(self):
-        pass
-
+        logger.info("Install mock modules: _cffi_backend")
+        dst = os.path.join(self.ctx.site_packages_dir, "_cffi_backend.so")
+        with open(dst, "w") as fd:
+            fd.write(" ")
 
 recipe = CFFIRecipe()
