@@ -23,8 +23,8 @@ class BoringSSLRecipe(CythonRecipe):
         "libbcrypto.a",
         "libdecrepit.a",
 
-        "libbrotlicommon-static.a",
-        "libbrotlidec-static.a",
+        "libbrotlicommon.a",
+        "libbrotlidec.a",
 
         "libcert_decompress.a",
         "libgetpeercert.a",
@@ -108,8 +108,8 @@ class BoringSSLRecipe(CythonRecipe):
             "build/boringssl/crypto/Release-iphoneos/libcrypto.a",
             "build/boringssl/decrepit/Release-iphoneos/libdecrepit.a",
 
-            "build/brotli/Release-iphoneos/libbrotlicommon-static.a",
-            "build/brotli/Release-iphoneos/libbrotlidec-static.a",
+            "build/brotli/Release-iphoneos/libbrotlicommon.a",
+            "build/brotli/Release-iphoneos/libbrotlidec.a",
 
             "build/cert_decompress/Release-iphoneos/libcert_decompress.a",
             "build/getpeercert/Release-iphoneos/libgetpeercert.a",
