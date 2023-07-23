@@ -11,32 +11,21 @@ logger = logging.getLogger(__name__)
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 root_path = os.path.abspath(os.path.join(current_path, os.path.pardir, os.path.pardir, os.path.pardir))
-pyBoringSSL_path = os.path.abspath(os.path.join(root_path, os.path.pardir, os.path.pardir, "pyBoringSSL"))
+pyutls_path = os.path.abspath(os.path.join(root_path, os.path.pardir, os.path.pardir, "pyutls"))
 
 
-class BoringSSLRecipe(CythonRecipe):
-    version = "1.1.1"
-    url = "https://github.com/XX-Net/pyBoringSSL/archive/{version}.zip"
+class PyUTLSRecipe(CythonRecipe):
+    version = "1.0.0"
+    url = "https://github.com/XX-Net/pyutls/archive/{version}.zip"
     depends = ["python"]
     libraries = [
-        "libbssl.a",
-        "libbcrypto.a",
-        "libdecrepit.a",
 
-        "libbrotlicommon.a",
-        "libbrotlidec.a",
-
-        "libcert_decompress.a",
-        "libgetpeercert.a",
-        "libcffi_boringssl.a",
     ]
-    custom_dir = pyBoringSSL_path
-    boringssl_version = "1.1.0"
-    brotli_version = "1.0.9"
+    custom_dir = pyutls_path
 
-    # def download(self):
-    #     # TODO: download if local ../pyBoringSSL not exist.
-    #     pass
+    def download(self):
+        # TODO: download if local ../pyBoringSSL not exist.
+        pass
 
     def extract_arch(self, arch):
         def ignore(src, names):
@@ -65,16 +54,16 @@ class BoringSSLRecipe(CythonRecipe):
     def prebuild_arch(self, arch):
         build_dir = self.get_build_dir(arch.arch)
         if not os.path.isfile(os.path.join(build_dir, "boringssl", "CMakeLists.txt")):
-            self.download_file(f"https://github.com/XX-net/boringssl/archive/refs/tags/{self.boringssl_version}.zip", "boringssl.zip", build_dir)
+            self.download_file("https://github.com/XX-net/boringssl/archive/refs/tags/0.0.1.zip", "boringssl.zip", build_dir)
             self.extract_file("boringssl.zip", build_dir)
             shutil.rmtree(os.path.join(build_dir, "boringssl"))
-            os.rename(os.path.join(build_dir, f"boringssl-{self.boringssl_version}"), os.path.join(build_dir, "boringssl"))
+            os.rename(os.path.join(build_dir, "boringssl-0.0.1"), os.path.join(build_dir, "boringssl"))
 
         if not os.path.isfile(os.path.join(build_dir, "brotli", "CMakeLists.txt")):
-            self.download_file(f"https://github.com/google/brotli/archive/refs/tags/v{self.brotli_version}.zip", "brotli.zip", build_dir)
+            self.download_file("https://github.com/google/brotli/archive/refs/tags/v1.0.9.zip", "brotli.zip", build_dir)
             self.extract_file("brotli.zip", build_dir)
             shutil.rmtree(os.path.join(build_dir, "brotli"))
-            os.rename(os.path.join(build_dir, f"brotli-{self.brotli_version}"), os.path.join(build_dir, "brotli"))
+            os.rename(os.path.join(build_dir, "brotli-1.0.9"), os.path.join(build_dir, "brotli"))
 
     def build_arch(self, arch):
         build_dir = self.get_build_dir(arch.arch)
