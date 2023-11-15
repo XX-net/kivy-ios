@@ -782,7 +782,7 @@ class Recipe:
             return
 
         if not isdir(self.build_dir):
-            mkdir(self.build_dir)
+            makedirs(self.build_dir, exist_ok=True)
         self.extract_arch(arch.arch)
         self.set_marker("building")
 
