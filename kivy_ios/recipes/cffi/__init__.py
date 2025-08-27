@@ -18,7 +18,7 @@ class CFFIRecipe(PythonRecipe):
         "lib_cffi_backend.a"
     ]
 
-    def prebuild_arch(self, arch):
+    def prebuild_platform(self, plat):
         # common to all archs
         if self.has_marker("patched"):
             return
@@ -27,15 +27,15 @@ class CFFIRecipe(PythonRecipe):
         self.copy_file("ios.toolchain.cmake", ".")
         self.set_marker("patched")
 
-    def build_arch(self, arch):
-        build_dir = self.get_build_dir(arch.arch)
-        logger.info("Building cffi {} in {}".format(arch.arch, build_dir))
+    def build_platform(self, plat):
+        build_dir = self.get_build_dir(plat)
+        logger.info("Building cffi {} in {}".format(plat.arch, build_dir))
         chdir(build_dir)
 
         os.environ["PATH"] = "/opt/local/bin:/opt/local/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/go/bin:/Library/Apple/usr/bin"
 
         cmake = sh.Command("/usr/local/bin/cmake")
-        if arch.arch in ["x86_64"]:
+        if plat.arch in ["x86_64"]:
             shprint(cmake, "-Hc", "-G", "Xcode", "-Bbuild",
                     "-DCMAKE_TOOLCHAIN_FILE=" + os.path.join(build_dir, "ios.toolchain.cmake"),
                     "-DPLATFORM=SIMULATOR64")
@@ -45,10 +45,10 @@ class CFFIRecipe(PythonRecipe):
                     "-DPLATFORM=OS64")
 
         shprint(cmake, "--build", "build", "--config", "Release")
-        print("build " + arch.arch)
+        print("build " + plat.arch)
 
-    def postbuild_arch(self, arch):
-        build_dir = self.get_build_dir(arch.arch)
+    def postbuild_platform(self, plat):
+        build_dir = self.get_build_dir(plat)
 
         libraries = [
             "build/Release-iphoneos/lib_cffi_backend.a",
@@ -56,7 +56,7 @@ class CFFIRecipe(PythonRecipe):
 
         for fp in libraries:
             fpl = fp.split("/")
-            if arch.arch == "x86_64":
+            if plat.arch == "x86_64":
                 fpl[-2] = "Release-iphonesimulator"
             else:
                 fpl[-2] = "Release-iphoneos"
@@ -73,5 +73,11 @@ class CFFIRecipe(PythonRecipe):
         dst = os.path.join(self.ctx.site_packages_dir, "_cffi_backend.so")
         with open(dst, "w") as fd:
             fd.write(" ")
+    
+    # def create_xcframeworks(self):
+    #     logger.info("Skipping xcframework creation for cffi due to duplicate architecture identifiers")
+    #     # Skip xcframework creation for cffi as both iphoneos-arm64 and iphonesimulator-arm64
+    #     # would result in the same ios-arm64 identifier, causing xcodebuild conflicts
+    #     pass
 
 recipe = CFFIRecipe()
