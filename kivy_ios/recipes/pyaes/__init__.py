@@ -26,11 +26,16 @@ class pyAESRecipe(CythonRecipe):
     ]
     cryptopp_version = "8.9"
 
+    @property
+    def archive_root(self):
+        return f"pyAES-{self.version}"
+
     def download(self):
         pass
 
     def extract(self):
-        pass
+        # Call the parent extract which will call extract_platform for each platform
+        super().extract()
 
     def extract_platform(self, plat):
         # Copy pyAES from parent dir.
@@ -61,31 +66,37 @@ class pyAESRecipe(CythonRecipe):
 
     def build_cryptopp(self, plat):
         build_dir = self.get_build_dir(plat)
-        chdir(build_dir)
-
-        os.environ["IOS_SDK"] = "iPhoneOS"
-
-        if plat.arch in ["x86_64"]:
-            os.environ["IOS_CPU"] = "x86_64"
-        else:
-            os.environ["IOS_CPU"] = "arm64"
-        # IOS_SDK=iPhoneOS IOS_CPU=arm64 source TestScripts/setenv-ios.sh
-        # make
-
-        build_ios_lib = sh.Command(os.path.join(build_dir, "build_cryptopp_ios.sh"))
-        shprint(build_ios_lib)
+        cryptopp_dir = os.path.join(build_dir, "cryptopp")
+        chdir(cryptopp_dir)
+        
+        # Get the platform environment for cross-compilation
+        env = self.get_recipe_env(plat)
+        
+        # Set up cross-compilation environment for cryptopp
+        make_env = env.copy()
+        make_env.update({
+            "CXX": env["CXX"],
+            "CXXFLAGS": env["CXXFLAGS"] + " -DNDEBUG -fPIC -std=c++11",
+            "AR": env["AR"],
+            "RANLIB": env["AR"] + " s",
+        })
+        
+        # Use the cross-compilation makefile
+        shprint(sh.make, "-f", "GNUmakefile-cross", "static", "-j8", _env=make_env)
 
     def build_aes_cfb(self, plat):
-        # cmake -G Xcode -Bbuild -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake  -DPLATFORM=OS64 -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_Swift_COMPILER_FORCED=true -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+        build_dir = self.get_build_dir(plat)
+        chdir(build_dir)
+        
+        toolchain_file = os.path.join(build_dir, "ios.toolchain.cmake")
+        
         cmake = sh.Command("/usr/local/bin/cmake")
         if plat.arch in ["x86_64"]:
-            shprint(cmake, "-G", "Xcode", "-Bbuild_aes", "-DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake",
-                    "-DPLATFORM=SIMULATOR64",
-                    )
+            shprint(cmake, "-G", "Xcode", "-Bbuild_aes", f"-DCMAKE_TOOLCHAIN_FILE={toolchain_file}",
+                    "-DPLATFORM=SIMULATOR64", "aes_cfb")
         else:
-            shprint(cmake, "-G", "Xcode", "-Bbuild_aes", "-DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake",
-                    "-DPLATFORM=OS64",
-                    )
+            shprint(cmake, "-G", "Xcode", "-Bbuild_aes", f"-DCMAKE_TOOLCHAIN_FILE={toolchain_file}",
+                    "-DPLATFORM=OS64", "aes_cfb")
 
         # cmake --build build -v -j8 --config Release --target aes_cfb
         shprint(cmake, "--build", "build_aes", "--config", "Release", "--target", "aes_cfb")
@@ -103,7 +114,7 @@ class pyAESRecipe(CythonRecipe):
 
         self.build_aes_cfb(plat)
 
-    def postbuild_platformh(self, plat):
+    def postbuild_platform(self, plat):
         build_dir = self.get_build_dir(plat)
 
         shutil.copyfile(
@@ -113,12 +124,12 @@ class pyAESRecipe(CythonRecipe):
 
         if plat.arch in ["x86_64"]:
             shutil.copyfile(
-                join(build_dir, "build_aes", "aes_cfb", "Release-iphonesimulator", "libaes_cfb.a"),
+                join(build_dir, "build_aes", "Release-iphonesimulator", "libaes_cfb.a"),
                 join(build_dir, "libaes_cfb.a")
             )
         else:
             shutil.copyfile(
-                join(build_dir, "build_aes", "aes_cfb", "Release-iphoneos", "libaes_cfb.a"),
+                join(build_dir, "build_aes", "Release-iphoneos", "libaes_cfb.a"),
                 join(build_dir, "libaes_cfb.a")
             )
         super().postbuild_platform(plat)
