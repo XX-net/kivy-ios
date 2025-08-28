@@ -26,17 +26,6 @@ class pyAESRecipe(CythonRecipe):
     ]
     cryptopp_version = "8.9"
 
-    @property
-    def archive_root(self):
-        return f"pyAES-{self.version}"
-
-    def download(self):
-        pass
-
-    def extract(self):
-        # Call the parent extract which will call extract_platform for each platform
-        super().extract()
-
     def extract_platform(self, plat):
         # Copy pyAES from parent dir.
 
