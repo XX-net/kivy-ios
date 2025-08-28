@@ -15,7 +15,7 @@ pyAES_path = os.path.abspath(os.path.join(root_path, os.path.pardir, os.path.par
 
 
 class pyAESRecipe(CythonRecipe):
-    version = "1.0.1"
+    version = "1.0.2"
 
     url = "https://github.com/XX-net/pyAES/archive/{version}.zip"
     depends = ["python"]
@@ -52,20 +52,20 @@ class pyAESRecipe(CythonRecipe):
     def prebuild_platform(self, plat):
         logger.debug("pyaes prebuild %s", plat.name)
         # download cryptopp if not downloaded.
-        build_dir = self.get_build_dir(plat.arch)
+        build_dir = self.get_build_dir(plat)
         if not os.path.isfile(os.path.join(build_dir, "cryptopp", "aes.h")):
             self.download_file(f"https://github.com/XX-net/cryptopp/archive/refs/tags/{self.cryptopp_version}.zip", "cryptopp.zip", build_dir)
             self.extract_file("cryptopp.zip", build_dir)
             shutil.rmtree(os.path.join(build_dir, "cryptopp"))
             os.rename(os.path.join(build_dir, f"cryptopp-{self.cryptopp_version}"), os.path.join(build_dir, "cryptopp"))
 
-    def build_cryptopp(self, arch):
-        build_dir = self.get_build_dir(arch.arch)
+    def build_cryptopp(self, plat):
+        build_dir = self.get_build_dir(plat)
         chdir(build_dir)
 
         os.environ["IOS_SDK"] = "iPhoneOS"
 
-        if arch.arch in ["x86_64"]:
+        if plat.arch in ["x86_64"]:
             os.environ["IOS_CPU"] = "x86_64"
         else:
             os.environ["IOS_CPU"] = "arm64"
@@ -75,10 +75,10 @@ class pyAESRecipe(CythonRecipe):
         build_ios_lib = sh.Command(os.path.join(build_dir, "build_cryptopp_ios.sh"))
         shprint(build_ios_lib)
 
-    def build_aes_cfb(self, arch):
+    def build_aes_cfb(self, plat):
         # cmake -G Xcode -Bbuild -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake  -DPLATFORM=OS64 -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_Swift_COMPILER_FORCED=true -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
         cmake = sh.Command("/usr/local/bin/cmake")
-        if arch.arch in ["x86_64"]:
+        if plat.arch in ["x86_64"]:
             shprint(cmake, "-G", "Xcode", "-Bbuild_aes", "-DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake",
                     "-DPLATFORM=SIMULATOR64",
                     )
@@ -91,7 +91,7 @@ class pyAESRecipe(CythonRecipe):
         shprint(cmake, "--build", "build_aes", "--config", "Release", "--target", "aes_cfb")
 
     def build_platform(self, plat):
-        build_dir = self.get_build_dir(plat.arch)
+        build_dir = self.get_build_dir(plat)
         logger.info("Building pyAES {} in {}".format(plat.arch, build_dir))
         chdir(build_dir)
 
@@ -104,7 +104,7 @@ class pyAESRecipe(CythonRecipe):
         self.build_aes_cfb(plat)
 
     def postbuild_platformh(self, plat):
-        build_dir = self.get_build_dir(plat.arch)
+        build_dir = self.get_build_dir(plat)
 
         shutil.copyfile(
             join(build_dir, "cryptopp", "libcryptopp.a"),
