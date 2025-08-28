@@ -68,21 +68,11 @@ class pyAESRecipe(CythonRecipe):
         build_dir = self.get_build_dir(plat)
         cryptopp_dir = os.path.join(build_dir, "cryptopp")
         chdir(cryptopp_dir)
-        
-        # Get the platform environment for cross-compilation
-        env = self.get_recipe_env(plat)
-        
-        # Set up cross-compilation environment for cryptopp
-        make_env = env.copy()
-        make_env.update({
-            "CXX": env["CXX"],
-            "CXXFLAGS": env["CXXFLAGS"] + " -DNDEBUG -fPIC -std=c++11",
-            "AR": env["AR"],
-            "RANLIB": env["AR"] + " s",
-        })
-        
-        # Use the cross-compilation makefile
-        shprint(sh.make, "-f", "GNUmakefile-cross", "static", "-j8", _env=make_env)
+
+        make_env = plat.get_env()
+        make_env["IOS_SDK"] = "iPhoneOS"
+        make_env["IOS_CPU"] = "arm64"
+        shprint(sh.make, "static", self.ctx.concurrent_make, _env=make_env)
 
     def build_aes_cfb(self, plat):
         build_dir = self.get_build_dir(plat)
