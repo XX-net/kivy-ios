@@ -137,9 +137,7 @@ class BoringSSLRecipe(CythonRecipe):
             shutil.copyfile(src, dst)
 
     def install(self):
-        dst = os.path.join(self.ctx.site_packages_dir, "boringssl.so")
-        with open(dst, "w") as fd:
-            fd.write(" ")
+        pass
 
 
 recipe = BoringSSLRecipe()
